@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LF to CSV converter</title>
+<style>
+  :root {
+    --bg: #eef2f5; --panel: #ffffff; --ink: #1c2530; --muted: #5d6b7a;
+    --line: #cfd8e0; --accent: #0b6e69; --accent-ink: #ffffff; --warn: #a4380f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131a20; --panel: #1b242c; --ink: #e6edf3; --muted: #93a1af;
+            --line: #2f3d49; --accent: #3cc2b8; --accent-ink: #06201e; --warn: #f0906a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  .quick { background: var(--panel); border: 2px solid var(--accent); border-radius: 10px;
+           padding: 16px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 20px; }
+  .quick p { margin: 0; flex: 1 1 260px; color: var(--muted); font-size: .95rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+  label.h { display: block; font-weight: 600; margin-bottom: 6px; }
+  textarea { width: 100%; min-height: 240px; resize: vertical; padding: 12px; border-radius: 8px;
+             border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+             font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  textarea:focus, button:focus-visible, select:focus-visible, input:focus-visible {
+    outline: 3px solid var(--accent); outline-offset: 2px; }
+  .opts { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; margin: 16px 0; display: flex; flex-wrap: wrap; gap: 8px 22px; align-items: center; }
+  .opts label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  select, input[type=text] { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+             background: var(--bg); color: var(--ink); font: inherit; }
+  input[type=text] { width: 4.5em; text-align: center; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button { font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 8px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.big { padding: 12px 20px; font-size: 1.05rem; }
+  #status { min-height: 1.5em; margin-top: 12px; color: var(--muted); }
+  #status.err { color: var(--warn); }
+  #count { color: var(--muted); font-size: .9rem; margin-left: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LF to CSV converter</h1>
+  <p class="sub">Turn a list with one value per line into a single comma-separated row.</p>
+
+  <section class="quick" aria-label="One-click">
+    <p>Have the list copied already? One click reads your clipboard, converts it and copies the CSV back.</p>
+    <button class="primary big" id="oneClick" type="button">Paste, convert and copy</button>
+  </section>
+
+  <div class="grid">
+    <div>
+      <label class="h" for="input">Input (one value per line)</label>
+      <textarea id="input" placeholder="apple&#10;banana&#10;cherry" spellcheck="false"></textarea>
+    </div>
+    <div>
+      <label class="h" for="output">CSV output</label>
+      <textarea id="output" readonly placeholder="apple,banana,cherry"></textarea>
+    </div>
+  </div>
+
+  <div class="opts" role="group" aria-label="Options">
+    <label>Direction
+      <select id="dir">
+        <option value="l2c">LF to CSV</option>
+        <option value="c2l">CSV to LF</option>
+      </select>
+    </label>
+    <label>Separator <input type="text" id="sep" value="," maxlength="3" aria-label="Separator"></label>
+    <label><input type="checkbox" id="trim" checked> Trim spaces</label>
+    <label><input type="checkbox" id="skip" checked> Skip empty lines</label>
+    <label><input type="checkbox" id="dedupe"> Remove duplicates</label>
+    <label><input type="checkbox" id="quote"> Wrap values in quotes</label>
+  </div>
+
+  <div class="bar">
+    <button class="primary" id="convert" type="button">Convert</button>
+    <button id="copy" type="button">Copy result</button>
+    <button id="paste" type="button">Paste from clipboard</button>
+    <button id="clear" type="button">Clear</button>
+    <span id="count"></span>
+  </div>
+  <div id="status" role="status" aria-live="polite"></div>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var input = $('input'), output = $('output'), statusEl = $('status');
+
+  function say(msg, isErr) {
+    statusEl.textContent = msg;
+    statusEl.className = isErr ? 'err' : '';
+  }
+
+  function convert(text) {
+    var sep = $('sep').value || ',';
+    var trim = $('trim').checked, skip = $('skip').checked;
+    var dedupe = $('dedupe').checked, quote = $('quote').checked;
+    var toLF = $('dir').value === 'c2l';
+
+    // Handles LF, CRLF and old-Mac CR line endings
+    var parts = toLF ? text.split(sep) : text.split(/\r\n|\n|\r/);
+    if (trim) parts = parts.map(function (s) { return s.trim(); });
+    if (skip) parts = parts.filter(function (s) { return s !== ''; });
+    if (dedupe) parts = parts.filter(function (s, i) { return parts.indexOf(s) === i; });
+
+    if (toLF) return { text: parts.join('\n'), n: parts.length };
+    if (quote) parts = parts.map(function (s) { return '"' + s.replace(/"/g, '""') + '"'; });
+    else parts = parts.map(function (s) {
+      // Quote only when the value would break the CSV
+      return (s.indexOf(sep) > -1 || /["\n]/.test(s)) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    });
+    return { text: parts.join(sep), n: parts.length };
+  }
+
+  function run(text) {
+    var r = convert(text);
+    output.value = r.text;
+    $('count').textContent = r.n + (r.n === 1 ? ' value' : ' values');
+    return r;
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    // Fallback for file:// or older browsers
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy') ? resolve() : reject(); }
+      catch (e) { reject(e); }
+      document.body.removeChild(ta);
+    });
+  }
+
+  function readClip() {
+    if (navigator.clipboard && navigator.clipboard.readText) return navigator.clipboard.readText();
+    return Promise.reject(new Error('unsupported'));
+  }
+
+  $('convert').onclick = function () {
+    if (!input.value.trim()) { say('Enter or paste some text first.', true); return; }
+    var r = run(input.value);
+    say('Converted ' + r.n + ' values.');
+  };
+
+  $('copy').onclick = function () {
+    if (!output.value) { say('Nothing to copy yet. Convert first.', true); return; }
+    copyText(output.value).then(function () { say('Copied to clipboard.'); },
+      function () { say('Copy failed. Select the result and press Ctrl+C.', true); });
+  };
+
+  $('paste').onclick = function () {
+    readClip().then(function (t) {
+      input.value = t; run(t); say('Pasted and converted.');
+    }, function () { say('Clipboard access was blocked. Click the input box and press Ctrl+V.', true); });
+  };
+
+  $('oneClick').onclick = function () {
+    readClip().then(function (t) {
+      if (!t.trim()) { say('Clipboard is empty. Copy your list first.', true); return; }
+      input.value = t;
+      var r = run(t);
+      return copyText(r.text).then(function () {
+        say('Done. ' + r.n + ' values converted and copied. Ready to paste.');
+      });
+    }).catch(function () {
+      say('Clipboard access was blocked. Allow it in the browser prompt, or paste into the input box.', true);
+    });
+  };
+
+  $('clear').onclick = function () {
+    input.value = ''; output.value = ''; $('count').textContent = ''; say(''); input.focus();
+  };
+
+  // Live convert while typing or changing options
+  input.addEventListener('input', function () { if (input.value) run(input.value); else output.value = ''; });
+  ['dir', 'sep', 'trim', 'skip', 'dedupe', 'quote'].forEach(function (id) {
+    $(id).addEventListener('change', function () { if (input.value) run(input.value); });
+    $(id).addEventListener('input', function () { if (input.value) run(input.value); });
+  });
+})();
+</script>
+</body>
+</html>
